@@ -6,9 +6,6 @@ import numpy as np
 dtmillisec = 50                      # milliseconds
 dtsec = dtmillisec / 1000.0
 
-
-# Input
-
 # Pos
 
 rad_vec = np.array([0.0, 0.0])  
@@ -109,7 +106,6 @@ def update_pred(alpha, beta):
     pred_vel[1] = pred_vel[0] + beta * dtsec * pred_acc[1]
     
 # Estimation
-    beta * dtsec * pred_acc[1]
 def update_estimation():
     global est_point_vec, pred_vel
     
