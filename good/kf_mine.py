@@ -2,94 +2,97 @@ import matplotlib.pyplot as plt
 from   matplotlib.animation import FuncAnimation
 import numpy as np
 
-#1D. no matrixes no shit. state is pos + velocity + acc
+#1D. state is pos + velocity + acc
 
 class System():
     def __init__(self, dt, cmd_vel, real_state, sigma_cmd_noise, sigma_meas_noise):
         self.dt = dt
-        self.cmd_vel = cmd_vel                      
-        self.real_state = real_state.copy()
-        self.prev_real_state = real_state.copy()
+        
+        # Command Stuff
+        self.cmd_vel_start_val = cmd_vel
+        self.cmd_vel = cmd_vel
+        self.prev_cmd_vel = cmd_vel
+        
+        # States              
+        self.real_state = (np.matrix(real_state)).T
+        self.prev_real_state = self.real_state.copy()
+        
+        # Noises
         self.sigma_cmd_noise = sigma_cmd_noise       
         self.sigma_meas_noise = sigma_meas_noise
         
         # Initials (for reset)
-        
-        self.initial_state = real_state.copy()    
+        self.initial_state = self.real_state.copy()
+        self.t = 0
         
     def reset(self):
         self.real_state = self.initial_state.copy()
         self.prev_real_state = self.initial_state.copy()
         
     def update(self):
+        self.prev_cmd_vel = self.cmd_vel
+        self.t += self.dt
+        self.cmd_vel = self.cmd_vel_start_val* np.sin(self.t) + 1
         self.prev_real_state = self.real_state.copy()
         
-        self.real_state[0] = self.prev_real_state[0] + self.prev_real_state[1] * self.dt                                           # Position
+        self.real_state[0] = self.prev_real_state[0] + self.prev_real_state[1] * self.dt                                           # Accurate Position
         self.real_state[1] = self.cmd_vel + self.sigma_cmd_noise * np.random.randn()                                               # Commanded Velocity
-        self.real_state[2] = (self.real_state[1] - self.prev_real_state[1]) / self.dt                                              # Accurate Acceleration
-        
-from collections import deque   
+        self.real_state[2] = (self.real_state[1] - self.prev_real_state[1]) / self.dt                                              # Accurate Acceleration  
 
 class AlphaBetaGammaFilter():
-    def __init__(self, dt, abg, system, initial_state, improved = False):
-        # Animation 
+    def __init__(self, dt, abg, system, initial_state):
+        # Step Time 
         self.dt = dt
-        
-        # Filter params (abg - alpha, beta, gamma)
-        self.alpha = abg[0]
-        self.beta = abg[1]
-        self.gamma = abg[2]
         
         # System
         self.system = system
+        
+        # Alpha Beta Gamma (some kind of)
+        self.abg = abg
 
         # Predictions
-        self.priori_state  = initial_state.copy()                                                                                   # k priori state
-        self.posteriori_state = initial_state.copy()                                                                                # k posteriori state
+        self.priori_state  = (np.matrix(initial_state)).T                                                                           # k priori state
+        self.posteriori_state = self.priori_state.copy()                                                                            # k posteriori state
              
-        self.prev_priori_state  = initial_state.copy()                                                                              # k-1 priori state
-        self.prev_posteriori_state = initial_state.copy()                                                                           # k-1 posteriori state
+        self.prev_priori_state  = self.priori_state.copy()                                                                          # k-1 priori state
+        self.prev_posteriori_state = self.priori_state.copy()                                                                       # k-1 posteriori state
         
         # Indicator Matrix
         self.I = np.matrix(np.eye(3))
         
-        # State Matrix
-        self.F = np.matrix([[1, self.dt, (self.dt**2 / 2)], 
-                            [0,       1,          self.dt], 
-                            [0,       0,                1]])
+        # Error Matrixes
+        self.Q = np.matrix([[dt ** 2,  dt, 2 * dt],
+                            [     dt,   1,      2],
+                            [ 2 * dt,   2,      4]]) * system.sigma_cmd_noise ** 2
+        self.R = system.sigma_meas_noise ** 2
+        
+        # State Matrix and Input Matrix
+        self.F = np.matrix([[1, 0, 0], 
+                            [0, 0, 0], 
+                            [0, 0, 0]])
         self.F_transposed = (self.F).T
         
+        self.G = np.matrix([[0, dt, 0],
+                            [0, 1,  0],
+                            [0, 0,  1]])
+        
+        self.U = (np.matrix([0, self.system.cmd_vel, (self.system.cmd_vel - self.system.prev_cmd_vel) / self.dt])).T
+        
         # Kalman Gain Matrix
-        self.KG = (np.matrix([self.gamma * (self.dt**2 / 2), self.beta * self.dt, self.alpha])).T
+        self.KG = (np.matrix([abg[0] * (self.dt**2 / 2), abg[1] * self.dt, abg[2]])).T
         
-        # Errors
-        self.Q = self.system.sigma_cmd_noise
-        self.R = self.system.sigma_meas_noise
-        self.R_inv = 1/self.R
-        
-        # Input Matrix
+        # Measurement Matrix
         self.H = np.matrix([0, 0, 1])
         self.H_transposed = (self.H).T
         
+        self.meas = np.dot(self.H, self.system.real_state.copy()) + self.system.sigma_meas_noise * np.random.randn()
+        
         # Estimation Error Cov
-        self.priori_P = self.I  * system.sigma_meas_noise
+        self.priori_P = self.I  * system.sigma_meas_noise ** 2
         self.posteriori_P = np.dot((self.I - np.dot(self.KG, self.H)), self.priori_P)
         
         # Initials (for reset)
         self.initial_state = initial_state.copy()
-        
-        # + buffer and mean of the buffer
-        self.improved = improved
-        if self.improved:
-            self.update = self._update_imprvd
-            self.data = {
-                'measurements'  : deque(maxlen=5),
-                'meas_mean'     : initial_state[2],
-                'accelerations' : deque(maxlen=5),
-                'acc_mean'      : initial_state[2]
-            }
-        else:
-            self.update = self._update_std
             
     def reset(self):
         self.priori_state  = self.initial_state.copy()                                                                                        
@@ -99,53 +102,42 @@ class AlphaBetaGammaFilter():
         self.prev_posteriori_state = self.initial_state.copy()                                                                                
     
     def measurement(self):
-        return self.system.real_state[2] + self.system.sigma_meas_noise * np.random.randn()                                         # Measured Velocity
+        self.meas = self.system.real_state[2] + self.system.sigma_meas_noise * np.random.randn()                                                                                              
+    
+    def U_upd(self):
+        self.U[1] =  self.system.cmd_vel
+        self.U[2] = (self.system.cmd_vel - self.system.prev_cmd_vel) / self.dt
     
     def predict(self):
         self.prev_posteriori_state = self.posteriori_state.copy()
         self.prev_priori_state = self.priori_state.copy()
+        self.U_upd()
         
-        self.priori_state[2] = self.prev_posteriori_state[2]                                                                        # Predict Acceleration
-        self.priori_state[1] = self.prev_posteriori_state[1] + self.dt * self.prev_posteriori_state[2]                              # Predict Velocity
-        self.priori_state[0] = self.prev_posteriori_state[0] + self.dt * self.prev_posteriori_state[1] + (self.dt**2 / 2) * self.prev_posteriori_state[2]       # Predict Position
-        
-    def _update_std(self):
-        measured_acc = self.measurement()
-        
-        self.posteriori_state[2] = self.priori_state[2] * (1 - self.alpha) + self.alpha * measured_acc                              # Update Acceleration
-        self.posteriori_state[1] = self.priori_state[1] + self.beta * self.dt * (measured_acc - self.priori_state[2])               # Update Velocity
-        self.posteriori_state[0] = self.priori_state[0] + self.gamma * (self.dt**2 / 2) * (measured_acc - self.priori_state[2])     # Update Position
+        self.priori_state = np.dot(self.F, self.prev_posteriori_state) + np.dot(self.G, self.U)
     
-    def _update_imprvd(self):
-        measured_acc = self.measurement()
-        self.data_upd(measured_acc, self.priori_state[2])
-        # innovationq = self.data['meas_mean'] - self.data['acc_mean']
-        innovation = measured_acc - self.posteriori_state[2]
+    def update(self):
+        self.measurement()
+        self.data_upd()
+        innovation = self.meas - np.dot(self.H, self.priori_state)
         
-        # print(self.KG)
-        # print(innovation)
+        self.posteriori_state = self.priori_state + np.dot(self.KG, innovation)
         
-        self.posteriori_state[0] = self.priori_state[0] #+ self.KG[0, 0] * innovation / 100                                          # Update Position
-        self.posteriori_state[1] = self.priori_state[1] + self.KG[1, 0] * innovation                                                # Update Velocity
-        self.posteriori_state[2] = self.priori_state[2] + self.KG[2, 0] * innovation                                                # Update Acceleration
+        self.abg[0] = self.KG[0,0] / (self.dt**2 / 2)
+        self.abg[1] = self.KG[1,0] / (self.dt)
+        self.abg[2] = self.KG[2,0]
         
-        self.gamma = self.KG[0,0] / (self.dt**2 / 2)
-        self.beta  = self.KG[1,0] / (self.dt)
-        self.alpha = self.KG[2,0]
-        
-    def data_upd(self, meas_acc, acc):
-        self.priori_P = np.dot(self.F, np.dot(self.posteriori_P, self.F_transposed)) + self.I * self.Q
-        self.posteriori_P = np.dot((self.I - np.dot(self.KG, self.H)), self.priori_P)  #try swapping posteriori P and KG
-        # print("priori P")
+    def data_upd(self):
+        # print("priori P:")
         # print(self.priori_P)
-        # print("posteriori P")
+        # print("posteriori P:")
         # print(self.posteriori_P)
+        # print("KG:")
+        # print(self.KG)
+        # print("Estimated State:")
+        # print(self.posteriori_state)
+        self.priori_P = np.dot(self.F, np.dot(self.posteriori_P, self.F_transposed)) + self.Q
+        self.posteriori_P = np.dot((self.I - np.dot(self.KG, self.H)), self.priori_P)
         self.KG = np.dot(self.posteriori_P, np.dot(self.H_transposed, self.R))
-        
-        self.data['measurements'].append(meas_acc)
-        self.data['meas_mean'] = sum(self.data['measurements']) / len(self.data['measurements'])
-        self.data['accelerations'].append(acc)
-        self.data['acc_mean'] = sum(self.data['accelerations']) / len(self.data['accelerations'])
         
 class Experiment:
     def __init__(self, system, filter, record=True):
@@ -158,8 +150,10 @@ class Experiment:
                 't': [],
                 'true_pos': [],
                 'true_vel': [],
+                'true_a'  : [],
                 'est_pos': [],
-                'est_vel': []
+                'est_vel': [],
+                'est_a'  : []
             }
             
     def reset(self):
@@ -171,8 +165,10 @@ class Experiment:
                 't': [],
                 'true_pos': [],
                 'true_vel': [],
+                'true_a'  : [],
                 'est_pos': [],
-                'est_vel': []
+                'est_vel': [],
+                'est_a'  : []
             }
     def step(self, frame):
         """Advance one time step and return current states."""
@@ -180,23 +176,25 @@ class Experiment:
         self.filter.predict()
         self.filter.update()
 
-        true_x = self.system.real_state[0]
-        true_v = self.system.real_state[1]
-        true_a = self.system.real_state[2]
-        est_x = self.filter.posteriori_state[0]
-        est_v = self.filter.posteriori_state[1]
-        est_a = self.filter.posteriori_state[2]
-        alpha = self.filter.alpha
-        beta = self.filter.beta
-        gamma = self.filter.gamma
+        true_x = self.system.real_state[0, 0]
+        true_v = self.system.real_state[1, 0]
+        true_a = self.system.real_state[2, 0]
+        est_x = self.filter.posteriori_state[0, 0]
+        est_v = self.filter.posteriori_state[1, 0]
+        est_a = self.filter.posteriori_state[2, 0]
+        alpha = self.filter.abg[0]
+        beta = self.filter.abg[1]
+        gamma = self.filter.abg[2]
 
         if self.record:
             t = frame * self.system.dt
             self.data['t'].append(t)
             self.data['true_pos'].append(true_x)
             self.data['true_vel'].append(true_v)
+            self.data['true_a'].append(true_a)
             self.data['est_pos'].append(est_x)
             self.data['est_vel'].append(est_v)
+            self.data['est_a'].append(est_a)
 
         return true_x, true_v, true_a, est_x, est_v, est_a, alpha, beta, gamma
     
@@ -307,11 +305,13 @@ class Plotter:
         est_pos = np.array(experiment.data['est_pos'])
         true_vel = np.array(experiment.data['true_vel'])
         est_vel = np.array(experiment.data['est_vel'])
+        true_a = np.array(experiment.data['true_a'])
+        est_a = np.array(experiment.data['est_a'])
 
         pos_error = est_pos - true_pos
         rmse = np.sqrt(np.mean(pos_error**2))
 
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
 
         ax1.plot(t, true_pos, 'r-', label='True')
         ax1.plot(t, est_pos, 'b--', label='Estimated')
@@ -324,14 +324,21 @@ class Plotter:
         ax2.set_ylabel('Velocity (m/s)')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
-
-        ax3.plot(t, pos_error, 'g-', label='Error')
-        ax3.axhline(0, color='black', linewidth=0.5)
-        ax3.set_xlabel('Time (s)')
-        ax3.set_ylabel('Error (m)')
+        
+        ax3.plot(t, true_a, 'r-', label='True')
+        ax3.plot(t, est_a, 'b--', label='Estimated')
+        ax3.set_ylabel('Acceleration (m/s^2)')
         ax3.legend()
         ax3.grid(True, alpha=0.3)
-        ax3.set_title(f'Position error (RMSE = {rmse:.4f} m)')
+
+        ax4.plot(t, pos_error, 'g-', label='Error')
+        ax4.axhline(0, color='black', linewidth=0.5)
+        ax4.set_xlabel('Time (s)')
+        ax4.set_ylabel('Error (m)')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        ax4.set_title(f'Position error (RMSE = {rmse:.4f} m)')
+        
 
         plt.tight_layout()
         plt.show()
