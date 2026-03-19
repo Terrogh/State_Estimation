@@ -24,9 +24,9 @@ class System():
     def update(self):
         self.prev_real_state = self.real_state.copy()
         
-        self.real_state[0] = self.prev_real_state[0] + self.prev_real_state[1] * self.dt                                         # Position
-        self.real_state[1] = self.cmd_vel + self.sigma_cmd_noise * np.random.randn()                                             # Commanded Velocity
-        self.real_state[2] = (self.real_state[1] - self.prev_real_state[1]) / self.dt                                            # Accurate Acceleration
+        self.real_state[0] = self.prev_real_state[0] + self.prev_real_state[1] * self.dt                                           # Position
+        self.real_state[1] = self.cmd_vel + self.sigma_cmd_noise * np.random.randn()                                               # Commanded Velocity
+        self.real_state[2] = (self.real_state[1] - self.prev_real_state[1]) / self.dt                                              # Accurate Acceleration
         
 from collections import deque   
 
@@ -44,11 +44,36 @@ class AlphaBetaGammaFilter():
         self.system = system
 
         # Predictions
-        self.priori_state  = initial_state.copy()                                                                                        # k priori state
-        self.posteriori_state = initial_state.copy()                                                                                     # k posteriori state
-                                    
-        self.prev_priori_state  = initial_state.copy()                                                                                   # k-1 priori state
-        self.prev_posteriori_state = initial_state.copy()                                                                                # k-1 posteriori state
+        self.priori_state  = initial_state.copy()                                                                                   # k priori state
+        self.posteriori_state = initial_state.copy()                                                                                # k posteriori state
+             
+        self.prev_priori_state  = initial_state.copy()                                                                              # k-1 priori state
+        self.prev_posteriori_state = initial_state.copy()                                                                           # k-1 posteriori state
+        
+        # Indicator Matrix
+        self.I = np.matrix(np.eye(3))
+        
+        # State Matrix
+        self.F = np.matrix([[1, self.dt, (self.dt**2 / 2)], 
+                            [0,       1,          self.dt], 
+                            [0,       0,                1]])
+        self.F_transposed = (self.F).T
+        
+        # Kalman Gain Matrix
+        self.KG = (np.matrix([self.gamma * (self.dt**2 / 2), self.beta * self.dt, self.alpha])).T
+        
+        # Errors
+        self.Q = self.system.sigma_cmd_noise
+        self.R = self.system.sigma_meas_noise
+        self.R_inv = 1/self.R
+        
+        # Input Matrix
+        self.H = np.matrix([0, 0, 1])
+        self.H_transposed = (self.H).T
+        
+        # Estimation Error Cov
+        self.priori_P = self.I  * system.sigma_meas_noise
+        self.posteriori_P = np.dot((self.I - np.dot(self.KG, self.H)), self.priori_P)
         
         # Initials (for reset)
         self.initial_state = initial_state.copy()
@@ -56,13 +81,13 @@ class AlphaBetaGammaFilter():
         # + buffer and mean of the buffer
         self.improved = improved
         if self.improved:
+            self.update = self._update_imprvd
             self.data = {
-                'measurements'  : deque(maxlen=10),
+                'measurements'  : deque(maxlen=5),
                 'meas_mean'     : initial_state[2],
-                'accelerations' : deque(maxlen=10),
+                'accelerations' : deque(maxlen=5),
                 'acc_mean'      : initial_state[2]
             }
-            self.update = self._update_imprvd
         else:
             self.update = self._update_std
             
@@ -93,16 +118,32 @@ class AlphaBetaGammaFilter():
     
     def _update_imprvd(self):
         measured_acc = self.measurement()
-        # self.data_upd(measured_acc, self.posteriori_state[2])
+        self.data_upd(measured_acc, self.priori_state[2])
+        # innovationq = self.data['meas_mean'] - self.data['acc_mean']
+        innovation = measured_acc - self.posteriori_state[2]
         
-        self.posteriori_state[2] = self.data['acc_mean'] * (1 - self.alpha) + self.alpha * self.data['meas_mean']                              # Update Acceleration
-        self.posteriori_state[1] = self.priori_state[1] + self.beta * self.dt * (self.data['meas_mean']  - self.data['acc_mean'])               # Update Velocity
-        self.posteriori_state[0] = self.priori_state[0] + self.gamma * (self.dt**2 / 2) * (self.data['meas_mean']  - self.data['acc_mean'])     # Update Position
+        # print(self.KG)
+        # print(innovation)
+        
+        self.posteriori_state[0] = self.priori_state[0] #+ self.KG[0, 0] * innovation / 100                                          # Update Position
+        self.posteriori_state[1] = self.priori_state[1] + self.KG[1, 0] * innovation                                                # Update Velocity
+        self.posteriori_state[2] = self.priori_state[2] + self.KG[2, 0] * innovation                                                # Update Acceleration
+        
+        self.gamma = self.KG[0,0] / (self.dt**2 / 2)
+        self.beta  = self.KG[1,0] / (self.dt)
+        self.alpha = self.KG[2,0]
         
     def data_upd(self, meas_acc, acc):
+        self.priori_P = np.dot(self.F, np.dot(self.posteriori_P, self.F_transposed)) + self.I * self.Q
+        self.posteriori_P = np.dot((self.I - np.dot(self.KG, self.H)), self.priori_P)  #try swapping posteriori P and KG
+        # print("priori P")
+        # print(self.priori_P)
+        # print("posteriori P")
+        # print(self.posteriori_P)
+        self.KG = np.dot(self.posteriori_P, np.dot(self.H_transposed, self.R))
+        
         self.data['measurements'].append(meas_acc)
         self.data['meas_mean'] = sum(self.data['measurements']) / len(self.data['measurements'])
-        
         self.data['accelerations'].append(acc)
         self.data['acc_mean'] = sum(self.data['accelerations']) / len(self.data['accelerations'])
         
@@ -141,9 +182,13 @@ class Experiment:
 
         true_x = self.system.real_state[0]
         true_v = self.system.real_state[1]
+        true_a = self.system.real_state[2]
         est_x = self.filter.posteriori_state[0]
         est_v = self.filter.posteriori_state[1]
+        est_a = self.filter.posteriori_state[2]
         alpha = self.filter.alpha
+        beta = self.filter.beta
+        gamma = self.filter.gamma
 
         if self.record:
             t = frame * self.system.dt
@@ -153,7 +198,7 @@ class Experiment:
             self.data['est_pos'].append(est_x)
             self.data['est_vel'].append(est_v)
 
-        return true_x, true_v, est_x, est_v, alpha
+        return true_x, true_v, true_a, est_x, est_v, est_a, alpha, beta, gamma
     
     def error_measure(self):
         true_pos = np.array(self.data['true_pos'])
@@ -215,7 +260,7 @@ class Animator:
 
     def update_plot(self, frame):
         # Let the experiment advance and record data
-        true_x, true_v, est_x, est_v, alpha = self.exp.step(frame)
+        true_x, true_v, true_a, est_x, est_v, est_a, alpha, beta, gamma = self.exp.step(frame)
 
         # Update graphical elements
         self.true_point.set_data([true_x], [0])
@@ -230,9 +275,11 @@ class Animator:
         self.ax.set_xlim(true_x - self.half_width, true_x + self.half_width)
 
         self.title.set_text(
-            f'True: x={true_x:.2f} m, v={true_v:.2f} m/s  |  '
-            f'Est: x={est_x:.2f} m, v={est_v:.2f} m/s  |  '
-            f'Alpha: {alpha:.2f}'
+            f'True: x={true_x:.2f} m, v={true_v:.2f} m/s, a={true_a:.2f}  |  '
+            f'Est: x={est_x:.2f} m, v={est_v:.2f} m/s, a={est_a:.2f}  |  \n'
+            f'alpha: {alpha:.2f}'
+            f'beta:  {beta:.2f}'
+            f'gamma: {gamma:.2f}'
         )
 
         return self.true_point, self.est_point, self.true_arrow, self.est_arrow, self.title
@@ -246,11 +293,6 @@ class Animator:
         )
         plt.show()
         # After closing the window, we can optionally call a plotter
-        
-
-
-import matplotlib.pyplot as plt
-import numpy as np
 
 class Plotter:    
     @staticmethod
